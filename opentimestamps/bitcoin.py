@@ -1,4 +1,4 @@
-# Copyright (C) 2016 The OpenTimestamps developers
+# Copyright (C) 2016-2018 The OpenTimestamps developers
 #
 # This file is part of python-opentimestamps.
 #
@@ -9,12 +9,9 @@
 # modified, propagated, or distributed except according to the terms contained
 # in the LICENSE file.
 
-from bitcoin.core import b2lx
-
 from opentimestamps.core.timestamp import Timestamp, cat_sha256d
-from opentimestamps.core.op import OpAppend, OpPrepend
+from opentimestamps.core.op import OpPrepend
 from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
-
 
 def __make_btc_block_merkle_tree(blk_txids):
     assert len(blk_txids) > 0
@@ -36,19 +33,26 @@ def __make_btc_block_merkle_tree(blk_txids):
 
 
 def make_timestamp_from_block(digest, block, blockheight, *, max_tx_size=1000):
-    """Make a timestamp for a digest from a block
+    """Make a timestamp for a message in a block
 
-    Returns a timestamp for that digest on success, None on failure
+    Every transaction within the block is serialized and checked to see if the
+    raw serialized bytes contain the message. If one or more transactions do,
+    the smallest transaction is used to create a timestamp proof for that
+    specific message to the block header.
+
+    To limit the maximum size of proof, transactions larger than `max_tx_size`
+    are ignored.
+
+    Returns a timestamp for that message on success, None on failure.
     """
-    # Find the smallest transaction containing the root digest
 
-    # FIXME: note how strategy changes once we add SHA256 midstate support
+    # Note how strategy changes if we add SHA256 midstate support
     len_smallest_tx_found = max_tx_size + 1
     commitment_tx = None
     prefix = None
     suffix = None
     for tx in block.vtx:
-        serialized_tx = tx.serialize()
+        serialized_tx = tx.serialize(params={'include_witness':False})
 
         if len(serialized_tx) > len_smallest_tx_found:
             continue
@@ -74,19 +78,20 @@ def make_timestamp_from_block(digest, block, blockheight, *, max_tx_size=1000):
     prefix_stamp = digest_timestamp.ops.add(OpPrepend(prefix))
     txid_stamp = cat_sha256d(prefix_stamp, suffix)
 
-    assert commitment_tx.GetHash() == txid_stamp.msg
+    assert commitment_tx.GetTxid() == txid_stamp.msg
 
     # Create the txid list, with our commitment txid op in the appropriate
     # place
     block_txid_stamps = []
     for tx in block.vtx:
-        if tx.GetHash() != txid_stamp.msg:
-            block_txid_stamps.append(Timestamp(tx.GetHash()))
+        if tx.GetTxid() != txid_stamp.msg:
+            block_txid_stamps.append(Timestamp(tx.GetTxid()))
         else:
             block_txid_stamps.append(txid_stamp)
 
     # Build the merkle tree
     merkleroot_stamp = __make_btc_block_merkle_tree(block_txid_stamps)
+    assert merkleroot_stamp.msg == block.hashMerkleRoot
 
     attestation = BitcoinBlockHeaderAttestation(blockheight)
     merkleroot_stamp.attestations.add(attestation)
